@@ -1,0 +1,168 @@
+name: Cross-Platform Rust Build & Upload Artifacts with Cache
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Add musl target
+        run: rustup target add x86_64-unknown-linux-musl
+
+      - name: Install musl-tools
+        run: sudo apt-get update && sudo apt-get install musl-tools
+
+      - name: Cache Cargo registry and target directory
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build for Linux (static)
+        run: cargo build --release --target x86_64-unknown-linux-musl
+
+      - name: Upload Linux binary as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: goober-sync-hub-linux
+          path: target/x86_64-unknown-linux-musl/release/goober-sync-hub
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Cache Cargo registry and target directory
+        uses: actions/cache@v3
+        with:
+          path: |
+            C:\Users\runneradmin\.cargo\registry
+            C:\Users\runneradmin\.cargo\git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build for Windows
+        run: cargo build --release
+
+      - name: Upload Windows binary as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: goober-sync-hub-windows
+          path: target\release\goober-sync-hub.exe
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Cache Cargo registry and target directory
+        uses: actions/cache@v3
+        with:
+          path: |
+            /Users/runner/Library/Caches/cargo/registry
+            /Users/runner/Library/Caches/cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build for MacOS
+        run: cargo build --release
+
+      - name: Upload MacOS binary as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: goober-sync-hub-macos
+          path: target/release/goober-sync-hub
+
+  release:
+    name: 🚀 Publish GitHub Release
+    needs: [build-linux, build-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get timestamp for tag
+        id: get_time
+        run: echo "tag_name=$(date +'%Y-%m-%d-%H-%M')" >> "$GITHUB_OUTPUT"
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: goober-sync-hub-linux
+          path: artifacts/linux
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: goober-sync-hub-windows
+          path: artifacts/windows
+
+      - name: Download MacOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: goober-sync-hub-macos
+          path: artifacts/macos
+
+      - name: Create Git Tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag ${{ steps.get_time.outputs.tag_name }}
+          git push origin ${{ steps.get_time.outputs.tag_name }}
+
+      - name: Rename Artifacts
+        run: |
+          mv artifacts/linux/goober-sync-hub artifacts/linux/goober-sync-hub-linux
+          mv artifacts/macos/goober-sync-hub artifacts/macos/goober-sync-hub-macos
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Release ${{ steps.get_time.outputs.tag_name }}
+          tag_name: ${{ steps.get_time.outputs.tag_name }}
+          files: |
+            artifacts/linux/goober-sync-hub-linux
+            artifacts/windows/goober-sync-hub.exe
+            artifacts/macos/goober-sync-hub-macos
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
