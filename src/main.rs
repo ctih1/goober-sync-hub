@@ -97,9 +97,12 @@ async fn handle_connection(stream: TcpStream, shared_events: SharedEventMap, sha
                     |&(_, val)|
                     val.get(&bot_name).unwrap_or(&0) < &max_events
                 ).count();
+
                 let handled_events = shared_connections.entry(*peer_addr).or_insert(HashMap::new()).entry(bot_name.clone()).or_insert(0);    
 
-                if *handled_events >= max_events && amount_of_available_conns <= 1 {
+                info!("Available connections: {}", amount_of_available_conns);
+
+                if *handled_events >= max_events && amount_of_available_conns >= 1 {
                     info!("Too many events for instance {}! Skipping turn", &bot_name);
                     let _ = sender.send(Message::Text("handled".to_string())).await;
 
