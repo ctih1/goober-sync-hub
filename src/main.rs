@@ -89,11 +89,14 @@ async fn handle_connection(stream: TcpStream, shared_events: SharedEventMap, sha
                 if &event == "get" {
                     if &message_id == "stats" {
                         info!("Sending stats");
+                        let mut text = String::new();
                         for (_, value) in shared_connection_map.lock().await.clone().into_iter() {
-                            if let Err(_) = sender.send(Message::Text(format!("{} -> {:#?}",value.keys().last().unwrap_or(&String::from("")), value.values().last().unwrap_or(&0)))).await {
-                                error!("Failed to send message!");
-                                let _ = sender.close().await;
-                            }
+                            text += &format!("{} -> {:#?}\n",value.keys().last().unwrap_or(&String::from("")), value.values().last().unwrap_or(&0))
+                        }
+
+                        if let Err(_) = sender.send(Message::Text(text)).await {
+                            error!("Failed to send message!");
+                            let _ = sender.close().await;
                         }
                     } else {
                         error!("Invalid messageid!");
