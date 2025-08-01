@@ -7,7 +7,7 @@ use tokio_tungstenite::{accept_async, tungstenite::Message};
 
                              // HashMap<MessageId, HashMap<Event, handled>>
 type SharedEventMap = Arc<Mutex<HashMap<String, HashMap<String, bool>>>>;
-                            // Hashmap<Name, amount of interactions accepted>
+                                                      // Hashmap<Name, amount of interactions accepted>
 type SharedConnectionMap = Arc<Mutex<HashMap<SocketAddr, HashMap<String, i32>>>>;
 
 #[tokio::main]
@@ -85,6 +85,21 @@ async fn handle_connection(stream: TcpStream, shared_events: SharedEventMap, sha
                     }
                     return;
                 }
+
+                if &event == "get" {
+                    if &message_id == "stats" {
+                        info!("Sending stats");
+                        for (_, value) in shared_connection_map.lock().await.clone().into_iter() {
+                            if let Err(_) = sender.send(Message::Text(format!("{} -> {:#?}",value.keys().last().unwrap_or(&String::from("")), value.values().last().unwrap_or(&0)))).await {
+                                error!("Failed to send message!");
+                                let _ = sender.close().await;
+                            }
+                        }
+                    } else {
+                        error!("Invalid messageid!");
+                    }
+                    continue;
+                }
                 
 
                 let mut map = shared_events.lock().await;
@@ -125,13 +140,11 @@ async fn handle_connection(stream: TcpStream, shared_events: SharedEventMap, sha
                 }
 
                 for (key, value) in shared_connections.clone().into_iter() {
-                    println!("{}({}) -> {:#?}", value.keys().last().unwrap_or(&String::from("")), key, value.values().last().unwrap_or(&0));
+                    println!("{} ({}) -> {:#?}", value.keys().last().unwrap_or(&String::from("")), key, value.values().last().unwrap_or(&0));
                 }     
 
                 drop(map);
                 drop(shared_connections);
-                
-
             }
             Ok(Message::Close(_)) => {
                 let mut connection_map = shared_connection_map.lock().await;
