@@ -1,4 +1,4 @@
-use std::{collections::{HashMap, HashSet}, net::SocketAddr, sync::Arc};
+use std::{collections::{HashMap, HashSet}, net::{IpAddr, SocketAddr}, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
 
 use futures::{SinkExt, StreamExt};
 use log::{error, info, trace, warn};
@@ -10,14 +10,13 @@ struct ConnectedBot {
     name: String,
     handled_events: i32,
 
-    // The string itself is an unsigner 64 bit integere
-    accessible_channel_ids: HashSet<String>
+    accessible_channel_ids: HashSet<u64>,
 }
 
                              // HashMap<MessageId, HashMap<Event, handled>>
-type SharedEventMap = Arc<Mutex<HashMap<String, HashMap<String, bool>>>>;
+type SharedEventMap = Arc<Mutex<HashMap<u64, HashMap<String, bool>>>>;
                                                       // Hashmap<Name, amount of interactions accepted>
-type SharedConnectionMap = Arc<Mutex<HashMap<SocketAddr, ConnectedBot>>>;
+type SharedConnectionMap = Arc<Mutex<HashMap<IpAddr, ConnectedBot>>>;
 
 #[tokio::main]
 async fn main() {
@@ -39,6 +38,7 @@ async fn main() {
 
 async fn handle_connection(stream: TcpStream, shared_events: SharedEventMap, shared_connection_map: SharedConnectionMap) {
     let max_events: i32 = 3;
+
     let peer_addr = &stream.peer_addr().unwrap();
     let ws_stream = match accept_async(stream).await {
         Ok(ws) => ws,
@@ -61,7 +61,7 @@ async fn handle_connection(stream: TcpStream, shared_events: SharedEventMap, sha
 
                 let mut event: String = String::new();
                 let mut message_id: String = String::new();
-                let mut channel_id: String = String::new();
+                let mut channel_id: u64 = 1010;
                 let mut bot_name: String = String::new();
 
                 for arg in texts {
@@ -82,14 +82,14 @@ async fn handle_connection(stream: TcpStream, shared_events: SharedEventMap, sha
                         "ref" => { message_id = value.to_string(); }
                         "event" => { event = value.to_string(); }
                         "name" => { bot_name = value.to_string(); }
-                        "channel" => { channel_id = value.to_string(); }
+                        "channel" => { channel_id = value.parse().unwrap_or(1010) }
                         _ => {
                             warn!("{}",format!("Invalid key {}!", key))
                         }
                     }
                 }
 
-                if event.is_empty() || message_id.is_empty() || bot_name.is_empty() || channel_id.is_empty() {
+                if event.is_empty() || message_id.is_empty() || bot_name.is_empty() || channel_id == 1010  {
                     error!("event or message_id not specified!");
 
                     if let Err(_) = 
@@ -106,9 +106,9 @@ async fn handle_connection(stream: TcpStream, shared_events: SharedEventMap, sha
                     if &message_id == "stats" {
                         info!("Sending stats");
                         let mut text = String::new();
-                        for (_, value) in shared_connection_map.lock().await.clone().into_iter() {
+                        for (_, bot) in shared_connection_map.lock().await.clone().into_iter() {
                             
-                            text += &format!("{} -> {:#?}\n",value.name, value.handled_events);
+                            text += &format!("{} -> {:#?}\n",bot.name, bot.handled_events);
                         }
 
                         if let Err(_) = sender.send(Message::Text(text)).await {
@@ -130,19 +130,19 @@ async fn handle_connection(stream: TcpStream, shared_events: SharedEventMap, sha
                 ).count();
 
                 let bot_info = shared_connections
-                    .entry(*peer_addr)
+                    .entry(peer_addr.ip())
                     .or_insert(ConnectedBot{
                         name: bot_name.clone(), accessible_channel_ids: HashSet::new(), handled_events:0
                 });
 
                 info!("Recieved '{}' in {} from {}" , &event, &message_id, &bot_info.name);
-                
-                if bot_info.accessible_channel_ids.insert(channel_id.clone()) {
+
+                if bot_info.accessible_channel_ids.insert(channel_id) {
                     info!("Added channel {}", &channel_id)
                 }
 
                 let mut event_map = shared_events.lock().await;
-                let message_events = event_map.entry(message_id).or_insert(HashMap::new());
+                let message_events = event_map.entry(message_id.parse().unwrap_or(0)).or_insert(HashMap::new());
 
                 trace!("Available connections: {}", available_connection_amount);
 
@@ -179,7 +179,7 @@ async fn handle_connection(stream: TcpStream, shared_events: SharedEventMap, sha
 
             Ok(Message::Close(_)) => {
                 let mut connection_map = shared_connection_map.lock().await;
-                connection_map.remove(peer_addr);
+                connection_map.remove(&peer_addr.ip());
             },
 
             Ok(_) => (),
