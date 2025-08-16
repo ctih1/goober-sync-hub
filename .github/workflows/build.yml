@@ -6,7 +6,7 @@ on:
       - master
 
 jobs:
-  build-linux:
+  build-linux-x64:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -23,7 +23,7 @@ jobs:
         run: rustup target add x86_64-unknown-linux-musl
 
       - name: Install musl-tools
-        run: sudo apt-get update && sudo apt-get install musl-tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Cache Cargo registry and target directory
         uses: actions/cache@v3
@@ -36,14 +36,53 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Build for Linux (static)
+      - name: Build for Linux x86_64 (static)
         run: cargo build --release --target x86_64-unknown-linux-musl
 
-      - name: Upload Linux binary as artifact
+      - name: Upload Linux x86_64 binary
         uses: actions/upload-artifact@v4
         with:
-          name: goober-sync-hub-linux
+          name: goober-sync-hub-linux-x64
           path: target/x86_64-unknown-linux-musl/release/goober-sync-hub
+
+  build-linux-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Add ARM64 musl target
+        run: rustup target add aarch64-unknown-linux-musl
+
+      - name: Install cross compiler for ARM64
+        run: sudo apt-get update && sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu
+
+      - name: Cache Cargo registry and target directory
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-arm64-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-arm64-
+
+      - name: Build for Linux ARM64 (static)
+        run: cargo build --release --target aarch64-unknown-linux-musl
+
+      - name: Upload Linux ARM64 binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: goober-sync-hub-linux-arm64
+          path: target/aarch64-unknown-linux-musl/release/goober-sync-hub
 
   build-windows:
     runs-on: windows-latest
@@ -72,7 +111,7 @@ jobs:
       - name: Build for Windows
         run: cargo build --release
 
-      - name: Upload Windows binary as artifact
+      - name: Upload Windows binary
         uses: actions/upload-artifact@v4
         with:
           name: goober-sync-hub-windows
@@ -105,7 +144,7 @@ jobs:
       - name: Build for MacOS
         run: cargo build --release
 
-      - name: Upload MacOS binary as artifact
+      - name: Upload MacOS binary
         uses: actions/upload-artifact@v4
         with:
           name: goober-sync-hub-macos
@@ -113,7 +152,7 @@ jobs:
 
   release:
     name: 🚀 Publish GitHub Release
-    needs: [build-linux, build-windows, build-macos]
+    needs: [build-linux-x64, build-linux-arm64, build-windows, build-macos]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -125,11 +164,17 @@ jobs:
         id: get_time
         run: echo "tag_name=$(date +'%Y-%m-%d-%H-%M')" >> "$GITHUB_OUTPUT"
 
-      - name: Download Linux artifact
+      - name: Download Linux x64 artifact
         uses: actions/download-artifact@v4
         with:
-          name: goober-sync-hub-linux
-          path: artifacts/linux
+          name: goober-sync-hub-linux-x64
+          path: artifacts/linux-x64
+
+      - name: Download Linux ARM64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: goober-sync-hub-linux-arm64
+          path: artifacts/linux-arm64
 
       - name: Download Windows artifact
         uses: actions/download-artifact@v4
@@ -152,7 +197,8 @@ jobs:
 
       - name: Rename Artifacts
         run: |
-          mv artifacts/linux/goober-sync-hub artifacts/linux/goober-sync-hub-linux
+          mv artifacts/linux-x64/goober-sync-hub artifacts/linux-x64/goober-sync-hub-linux-x64
+          mv artifacts/linux-arm64/goober-sync-hub artifacts/linux-arm64/goober-sync-hub-linux-arm64
           mv artifacts/macos/goober-sync-hub artifacts/macos/goober-sync-hub-macos
 
       - name: Create GitHub Release
@@ -161,7 +207,8 @@ jobs:
           name: Release ${{ steps.get_time.outputs.tag_name }}
           tag_name: ${{ steps.get_time.outputs.tag_name }}
           files: |
-            artifacts/linux/goober-sync-hub-linux
+            artifacts/linux-x64/goober-sync-hub-linux-x64
+            artifacts/linux-arm64/goober-sync-hub-linux-arm64
             artifacts/windows/goober-sync-hub.exe
             artifacts/macos/goober-sync-hub-macos
         env:
