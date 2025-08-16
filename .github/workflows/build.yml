@@ -62,18 +62,15 @@ jobs:
         run: rustup target add aarch64-unknown-linux-musl
 
       - name: Install cross compiler for ARM64
-        run: sudo apt-get update && sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
 
-      - name: Cache Cargo registry and target directory
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-arm64-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-arm64-
+      - name: Set linker for ARM64
+        run: |
+          mkdir -p ~/.cargo
+          cat >> ~/.cargo/config.toml <<EOF
+          [target.aarch64-unknown-linux-musl]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
 
       - name: Build for Linux ARM64 (static)
         run: cargo build --release --target aarch64-unknown-linux-musl
