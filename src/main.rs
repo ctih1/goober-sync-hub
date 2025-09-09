@@ -23,7 +23,7 @@ async fn main() {
     let mut builder = env_logger::Builder::new();
     builder.filter_level(log::LevelFilter::Debug).init();
     
-    let address = "0.0.0.0:3690";
+    let address = "0.0.0.0:80";
     let addr: SocketAddr =  address.parse().expect("Failed to parse address");
     let listener = TcpListener::bind(&addr).await.expect("Failed to bind");
     let shared_events: SharedEventMap = Arc::new(Mutex::new(HashMap::new()));
@@ -135,7 +135,7 @@ async fn handle_connection(stream: TcpStream, shared_events: SharedEventMap, sha
                         name: bot_name.clone(), accessible_channel_ids: HashSet::new(), handled_events:0
                 });
 
-                info!("Recieved '{}' in {} from {}" , &event, &message_id, &bot_info.name);
+                info!("Recieved '{}' in {} from {} ({})" , &event, &message_id, &bot_info.name, &peer_addr.ip());
 
                 if bot_info.accessible_channel_ids.insert(channel_id) {
                     info!("Added channel {}", &channel_id)
