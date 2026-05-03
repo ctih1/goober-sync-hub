@@ -1,24 +1,23 @@
-use std::{collections::{HashMap, HashSet}, net::{IpAddr, SocketAddr}, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
+use std::{collections::{HashMap, HashSet}, hash::{Hash, Hasher}, net::{IpAddr, SocketAddr}, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
 
 use futures::{SinkExt, StreamExt};
-use log::{error, info, trace, warn};
+use log::{error, info, debug, warn};
 use tokio::{net::{TcpListener, TcpStream}, sync::Mutex};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
+use fxhash::FxHasher;
 
-#[derive(Clone)]
-struct ConnectedBot {
-    name: String,
-    handled_events: i32,
-    last_event: u64,
-    accessible_channel_ids: HashSet<u64>,
+type EventKey = String;
+
+#[derive(Debug)]
+struct Bot {
+    associated_ip: SocketAddr,
+    accessible_events: HashSet<EventKey>,
+    event_counts: HashMap<EventKey, i32>,
+    channel_ids: HashSet<u64>
 }
 
-                             // HashMap<MessageId, HashMap<Event, handled>>
-type SharedEventMap = Arc<Mutex<HashMap<u64, HashMap<String, bool>>>>;
-                                                      // Hashmap<Name, amount of interactions accepted>
-type SharedConnectionMap = Arc<Mutex<HashMap<IpAddr, ConnectedBot>>>;
-
-type LastEventMap = Arc<Mutex<HashMap<u64, HashMap<String, u64>>>>;
+type BotMap = Arc<Mutex<HashMap<String, Bot>>>;
+type HandledEvents = Arc<Mutex<HashSet<u64>>>;
 
 #[tokio::main]
 async fn main() {
@@ -28,20 +27,18 @@ async fn main() {
     let address = "0.0.0.0:3960";
     let addr: SocketAddr =  address.parse().expect("Failed to parse address");
     let listener = TcpListener::bind(&addr).await.expect("Failed to bind");
-    let shared_events: SharedEventMap = Arc::new(Mutex::new(HashMap::new()));
-    let shared_connection_map: SharedConnectionMap = Arc::new(Mutex::new(HashMap::new()));
-    let last_event_map: LastEventMap = Arc::new(Mutex::new(HashMap::new()));
+
+    let bot_map: BotMap = Arc::new(Mutex::new(HashMap::new()));
+    let handled_events: HandledEvents = Arc::new(Mutex::new(HashSet::new()));
 
     info!("Listening on {}", address);
 
     while let Ok((stream, _)) = listener.accept().await {
-        tokio::spawn(handle_connection(stream, Arc::clone(&shared_events), Arc::clone(&shared_connection_map), Arc::clone(&last_event_map)));
+        tokio::spawn(handle_connection(stream, Arc::clone(&bot_map), Arc::clone(&handled_events)));
     }
 }
 
-async fn handle_connection(stream: TcpStream, shared_events: SharedEventMap, shared_connection_map: SharedConnectionMap, last_event_map: LastEventMap) {
-    let max_events: i32 = 3;
-
+async fn handle_connection(stream: TcpStream, bot_map_mutex: BotMap, handled_events_mutex: HandledEvents) {
     let peer_addr = &stream.peer_addr().unwrap();
     let ws_stream = match accept_async(stream).await {
         Ok(ws) => ws,
@@ -58,12 +55,10 @@ async fn handle_connection(stream: TcpStream, shared_events: SharedEventMap, sha
     while let Some(msg) = receiver.next().await {
         match msg {
             Ok(Message::Text(text)) => {
-                println!();
-                trace!("Recieved new requests");
                 let texts: Vec<&str> = text.split(";").collect();
 
                 let mut event: String = String::new();
-                let mut message_id: String = String::new();
+                let mut message_id: u64 = 1010;
                 let mut channel_id: u64 = 1010;
                 let mut bot_name: String = String::new();
 
@@ -82,7 +77,7 @@ async fn handle_connection(stream: TcpStream, shared_events: SharedEventMap, sha
                     let [key, value] = parts.as_slice().try_into().unwrap();
 
                     match key {
-                        "ref" => { message_id = value.to_string(); }
+                        "ref" => { message_id = value.parse().unwrap_or(1010); }
                         "event" => { event = value.to_string(); }
                         "name" => { bot_name = value.to_string(); }
                         "channel" => { channel_id = value.parse().unwrap_or(1010) }
@@ -92,104 +87,88 @@ async fn handle_connection(stream: TcpStream, shared_events: SharedEventMap, sha
                     }
                 }
 
-                if event.is_empty() || message_id.is_empty() || bot_name.is_empty() || channel_id == 1010  {
-                    error!("event or message_id not specified!");
+                info!("{}: {}", bot_name.clone(), event.clone());
 
-                    if let Err(_) = 
-                        sender.send(Message::Text("Invalid props passed! Expected ref=...;event=...;name=...;channel=...".to_string())).await
-                    {
-                        error!("Failed to send invalid message for invalid props");
-                        let _ = sender.close().await;
+                let mut bot_map = bot_map_mutex.lock().await;
+
+                if event == "get" {
+                    let mut text = String::new();
+
+                    for (name, bot) in bot_map.iter() {
+                        text += &format!("{} -> {:?}\n", name, bot.event_counts);
                     }
-                    return;
-                }
-
-
-                if &event == "get" {
-                    if &message_id == "stats" {
-                        info!("Sending stats");
-                        let mut text = String::new();
-                        for (_, bot) in shared_connection_map.lock().await.clone().into_iter() {
-                            
-                            text += &format!("{} -> {:#?}\n", bot.name, bot.handled_events);
-                        }
-
-                        info!("{}", &text);
-
-                        if let Err(_) = sender.send(Message::Text(text)).await {
-                            error!("Failed to send message!");
-                            let _ = sender.close().await;
-                        }
-                    } else {
-                        error!("Invalid messageid!");
-                    }
-
+                    
+                    let _ = sender.send(Message::Text(text)).await;
+                    drop(bot_map);
                     continue;
                 }
 
-                let mut shared_connections = shared_connection_map.lock().await;
-                
-                let available_connection_amount = shared_connections.iter().filter(
-                    |&(_, val)|
-                    val.handled_events < max_events && val.accessible_channel_ids.contains(&channel_id)
+
+                let available_bots= bot_map.iter().filter(
+                    |&(name, bot)|
+                    bot.channel_ids.contains(&channel_id) && 
+                    bot.accessible_events.contains(&event.clone()) && 
+                    *name != bot_name 
                 ).count();
 
-                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-                
-                let mut event_map = last_event_map.lock().await;
-                event_map.entry(channel_id).or_insert(HashMap::new()).insert(event.clone(), now);
-
-                let bot_info = shared_connections
-                    .entry(peer_addr.ip())
-                    .or_insert(ConnectedBot{
-                        name: bot_name.clone(), accessible_channel_ids: HashSet::new(), handled_events:0, last_event: now
+                let bot = bot_map.entry(bot_name.clone()).or_insert(Bot {
+                    associated_ip: *peer_addr,
+                    accessible_events: HashSet::new(),
+                    event_counts: HashMap::new(),
+                    channel_ids: HashSet::new()
                 });
 
-                info!("Recieved '{}' in {} from {} ({})" , &event, &message_id, &bot_info.name, &peer_addr.ip());
+                bot.channel_ids.insert(channel_id);
+                bot.accessible_events.insert(event.clone());
 
-                if bot_info.accessible_channel_ids.insert(channel_id) {
-                    info!("Added channel {}", &channel_id)
-                }
+                debug!("{}: {:#?}", bot_name.clone(), bot);
 
-                let mut event_map = shared_events.lock().await;
-                let message_events = event_map.entry(message_id.parse().unwrap_or(0)).or_insert(HashMap::new());
+                let mut hasher = FxHasher::default();
+                event.clone().hash(&mut hasher);
+                message_id.hash(&mut hasher);
+                channel_id.hash(&mut hasher);
 
-                trace!("Available connections: {}", available_connection_amount);
-                bot_info.last_event = now;
+                let event_id= hasher.finish();
+                debug!("Event id: {}", event_id);
 
-                if bot_info.handled_events >= max_events && available_connection_amount >= 1
-                {
-                    info!("Too many events for instance {}! Skipping turn", &bot_name);
+                let event_count = bot.event_counts.entry(event.clone()).or_insert(1);
+                info!("{}, {}", event_count, available_bots);
+
+                if available_bots >= 1 && *event_count > 3 {
+                    info!("Bot has gotten too many events..");
                     let _ = sender.send(Message::Text("handled".to_string())).await;
+                    *event_count -= 1;
 
-                    bot_info.handled_events -= 1;
                     continue;
                 }
 
-                let event_handled = message_events.get(&event).unwrap_or(&false);
-                if *event_handled {
-                    info!("Event already handled");
+                let mut handled_events = handled_events_mutex.lock().await;
+                if handled_events.contains(&event_id) {
+                    info!("Event already handled.. Skipping");
                     let _ = sender.send(Message::Text("handled".to_string())).await;
+
                     continue;
                 }
                 
-                info!("Event not handled... Marking as handled");
-                message_events.insert(event, true);
+                info!("Letting bot proceed");
+                *event_count += 1;
+                let _ = sender.send(Message::Text(String::from("unhandled"))).await;
 
-                bot_info.handled_events += 1;
+                handled_events.insert(event_id);
 
-                if let Err(_) = sender.send(Message::Text("unhandled".to_string())).await {
-                    error!("Failed to send message!");
-                    let _ = sender.close().await;
-                } 
-
-                drop(event_map);
-                drop(shared_connections);
+                drop(bot_map);
+                drop(handled_events);
+                println!();
+                continue;
             }
 
             Ok(Message::Close(_)) => {
-                let mut connection_map = shared_connection_map.lock().await;
-                connection_map.remove(&peer_addr.ip());
+                let mut bot_map = bot_map_mutex.lock().await;
+                
+                if let Some(bot_name) = bot_map.iter().find(|&(name, bot)| bot.associated_ip == *peer_addr).map(|(name, bot)| name.clone()) {
+                    info!("Dropped bot {}", bot_name);
+                    bot_map.remove(&bot_name);
+                }
             },
             Ok(_) => (),
             Err(e) => {
