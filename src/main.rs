@@ -9,7 +9,7 @@ use tokio_tungstenite::{accept_async, tungstenite::Message};
 struct ConnectedBot {
     name: String,
     handled_events: i32,
-
+    last_event: u64,
     accessible_channel_ids: HashSet<u64>,
 }
 
@@ -17,6 +17,8 @@ struct ConnectedBot {
 type SharedEventMap = Arc<Mutex<HashMap<u64, HashMap<String, bool>>>>;
                                                       // Hashmap<Name, amount of interactions accepted>
 type SharedConnectionMap = Arc<Mutex<HashMap<IpAddr, ConnectedBot>>>;
+
+type LastEventMap = Arc<Mutex<HashMap<u64, HashMap<String, u64>>>>;
 
 #[tokio::main]
 async fn main() {
@@ -28,15 +30,16 @@ async fn main() {
     let listener = TcpListener::bind(&addr).await.expect("Failed to bind");
     let shared_events: SharedEventMap = Arc::new(Mutex::new(HashMap::new()));
     let shared_connection_map: SharedConnectionMap = Arc::new(Mutex::new(HashMap::new()));
+    let last_event_map: LastEventMap = Arc::new(Mutex::new(HashMap::new()));
 
     info!("Listening on {}", address);
 
     while let Ok((stream, _)) = listener.accept().await {
-        tokio::spawn(handle_connection(stream, Arc::clone(&shared_events), Arc::clone(&shared_connection_map)));
+        tokio::spawn(handle_connection(stream, Arc::clone(&shared_events), Arc::clone(&shared_connection_map), Arc::clone(&last_event_map)));
     }
 }
 
-async fn handle_connection(stream: TcpStream, shared_events: SharedEventMap, shared_connection_map: SharedConnectionMap) {
+async fn handle_connection(stream: TcpStream, shared_events: SharedEventMap, shared_connection_map: SharedConnectionMap, last_event_map: LastEventMap) {
     let max_events: i32 = 3;
 
     let peer_addr = &stream.peer_addr().unwrap();
@@ -108,8 +111,10 @@ async fn handle_connection(stream: TcpStream, shared_events: SharedEventMap, sha
                         let mut text = String::new();
                         for (_, bot) in shared_connection_map.lock().await.clone().into_iter() {
                             
-                            text += &format!("{} -> {:#?}\n",bot.name, bot.handled_events);
+                            text += &format!("{} -> {:#?}\n", bot.name, bot.handled_events);
                         }
+
+                        info!("{}", &text);
 
                         if let Err(_) = sender.send(Message::Text(text)).await {
                             error!("Failed to send message!");
@@ -129,10 +134,15 @@ async fn handle_connection(stream: TcpStream, shared_events: SharedEventMap, sha
                     val.handled_events < max_events && val.accessible_channel_ids.contains(&channel_id)
                 ).count();
 
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                
+                let mut event_map = last_event_map.lock().await;
+                event_map.entry(channel_id).or_insert(HashMap::new()).insert(event.clone(), now);
+
                 let bot_info = shared_connections
                     .entry(peer_addr.ip())
                     .or_insert(ConnectedBot{
-                        name: bot_name.clone(), accessible_channel_ids: HashSet::new(), handled_events:0
+                        name: bot_name.clone(), accessible_channel_ids: HashSet::new(), handled_events:0, last_event: now
                 });
 
                 info!("Recieved '{}' in {} from {} ({})" , &event, &message_id, &bot_info.name, &peer_addr.ip());
@@ -145,6 +155,7 @@ async fn handle_connection(stream: TcpStream, shared_events: SharedEventMap, sha
                 let message_events = event_map.entry(message_id.parse().unwrap_or(0)).or_insert(HashMap::new());
 
                 trace!("Available connections: {}", available_connection_amount);
+                bot_info.last_event = now;
 
                 if bot_info.handled_events >= max_events && available_connection_amount >= 1
                 {
@@ -156,7 +167,6 @@ async fn handle_connection(stream: TcpStream, shared_events: SharedEventMap, sha
                 }
 
                 let event_handled = message_events.get(&event).unwrap_or(&false);
-
                 if *event_handled {
                     info!("Event already handled");
                     let _ = sender.send(Message::Text("handled".to_string())).await;
@@ -181,7 +191,6 @@ async fn handle_connection(stream: TcpStream, shared_events: SharedEventMap, sha
                 let mut connection_map = shared_connection_map.lock().await;
                 connection_map.remove(&peer_addr.ip());
             },
-
             Ok(_) => (),
             Err(e) => {
                 error!("Error decoding message {}", e);
