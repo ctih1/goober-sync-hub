@@ -1,14 +1,22 @@
-use std::{collections::{HashMap, HashSet}, hash::{Hash, Hasher}, net::{IpAddr, SocketAddr}, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
+use std::{clone, collections::{HashMap, HashSet, VecDeque}, hash::{Hash, Hasher}, net::{IpAddr, SocketAddr}, sync::Arc, time::{Duration, SystemTime, UNIX_EPOCH}};
 
 use futures::{SinkExt, StreamExt};
 use log::{error, info, debug, warn};
 use tokio::{net::{TcpListener, TcpStream}, sync::Mutex};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 use fxhash::FxHasher;
+use async_std::task;
 
 type EventKey = String;
+type EventHash = u64;
 
 #[derive(Debug)]
+struct Waiting {
+    bot_name: String,
+    start_timestamp: u64
+}
+
+#[derive(Debug, Clone)]
 struct Bot {
     associated_ip: SocketAddr,
     accessible_events: HashSet<EventKey>,
@@ -16,8 +24,10 @@ struct Bot {
     channel_ids: HashSet<u64>
 }
 
+
 type BotMap = Arc<Mutex<HashMap<String, Bot>>>;
-type HandledEvents = Arc<Mutex<HashSet<u64>>>;
+type HandledEvents = Arc<Mutex<HashSet<EventHash>>>;
+type WaitingMap = Arc<Mutex<HashMap<EventHash, Waiting>>>;
 
 #[tokio::main]
 async fn main() {
@@ -30,15 +40,26 @@ async fn main() {
 
     let bot_map: BotMap = Arc::new(Mutex::new(HashMap::new()));
     let handled_events: HandledEvents = Arc::new(Mutex::new(HashSet::new()));
+    let waiting_map: WaitingMap = Arc::new(Mutex::new(HashMap::new()));
 
     info!("Listening on {}", address);
 
     while let Ok((stream, _)) = listener.accept().await {
-        tokio::spawn(handle_connection(stream, Arc::clone(&bot_map), Arc::clone(&handled_events)));
+        tokio::spawn(handle_connection(
+                stream,
+                Arc::clone(&bot_map),
+                Arc::clone(&handled_events),
+                Arc::clone(&waiting_map)
+        ));
     }
 }
 
-async fn handle_connection(stream: TcpStream, bot_map_mutex: BotMap, handled_events_mutex: HandledEvents) {
+async fn handle_connection(
+    stream: TcpStream,
+    bot_map_mutex: BotMap,
+    handled_events_mutex: HandledEvents,
+    waiting_map_mutex: WaitingMap
+) {
     let peer_addr = &stream.peer_addr().unwrap();
     let ws_stream = match accept_async(stream).await {
         Ok(ws) => ws,
@@ -55,7 +76,11 @@ async fn handle_connection(stream: TcpStream, bot_map_mutex: BotMap, handled_eve
     while let Some(msg) = receiver.next().await {
         match msg {
             Ok(Message::Text(text)) => {
+                println!();
+
                 let texts: Vec<&str> = text.split(";").collect();
+
+                let epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
 
                 let mut event: String = String::new();
                 let mut message_id: u64 = 1010;
@@ -103,19 +128,26 @@ async fn handle_connection(stream: TcpStream, bot_map_mutex: BotMap, handled_eve
                     continue;
                 }
 
+                let mut hasher = FxHasher::default();
+                event.clone().hash(&mut hasher);
+                channel_id.hash(&mut hasher);                
+                message_id.hash(&mut hasher);
 
-                let available_bots= bot_map.iter().filter(
+                let event_id = hasher.finish();
+                debug!("Event id: {}", event_id);
+
+                let available_bots: HashMap<String, Bot> = bot_map.iter().filter(
                     |&(name, bot)|
                     bot.channel_ids.contains(&channel_id) && 
                     bot.accessible_events.contains(&event.clone()) && 
-                    *name != bot_name 
-                ).count();
+                    *name != bot_name
+                ).map(|(name, bot)| (name.clone(), bot.clone())).collect();
 
                 let bot = bot_map.entry(bot_name.clone()).or_insert(Bot {
                     associated_ip: *peer_addr,
                     accessible_events: HashSet::new(),
                     event_counts: HashMap::new(),
-                    channel_ids: HashSet::new()
+                    channel_ids: HashSet::new(),
                 });
 
                 bot.channel_ids.insert(channel_id);
@@ -123,42 +155,79 @@ async fn handle_connection(stream: TcpStream, bot_map_mutex: BotMap, handled_eve
 
                 debug!("{}: {:#?}", bot_name.clone(), bot);
 
-                let mut hasher = FxHasher::default();
-                event.clone().hash(&mut hasher);
-                message_id.hash(&mut hasher);
-                channel_id.hash(&mut hasher);
+                let waiting_map = waiting_map_mutex.lock().await;
+                let waiting_entry = waiting_map.get(&event_id.clone());
 
-                let event_id= hasher.finish();
-                debug!("Event id: {}", event_id);
-
-                let event_count = bot.event_counts.entry(event.clone()).or_insert(1);
-                info!("{}, {}", event_count, available_bots);
-
-                if available_bots >= 1 && *event_count > 3 {
-                    info!("Bot has gotten too many events..");
+                if let Some(t_bot) = waiting_entry && t_bot.bot_name != bot_name {
+                    info!("{:#?}", waiting_map);
+                    info!("Other bot already in queue.. skiping");
                     let _ = sender.send(Message::Text("handled".to_string())).await;
-                    *event_count -= 1;
-
+                    
                     continue;
                 }
+
+                drop(waiting_map);
 
                 let mut handled_events = handled_events_mutex.lock().await;
                 if handled_events.contains(&event_id) {
                     info!("Event already handled.. Skipping");
                     let _ = sender.send(Message::Text("handled".to_string())).await;
 
+
                     continue;
+                }
+
+                drop(handled_events);
+                
+                if !bot.event_counts.contains_key(&event.clone()) {
+                    bot.event_counts.insert(event.clone(), 0);
+                }
+
+                let mut bot_event_counts = bot.event_counts.iter().map(|(name, amount)| (name.clone(), *amount)).collect::<HashMap<String, i32>>();
+                let mut event_count = *bot_event_counts.entry(event.clone()).or_insert(0);
+            
+                let target_bot = available_bots.iter().find(|&(name, t_bot)| name == "squircle.macos");
+
+                if let Some((name, bot)) = target_bot {
+                    info!("Giving turn to {}", name);
+                    let _ = sender.send(Message::Text("handled".to_string())).await;
+
+                    let mut waiting_map = waiting_map_mutex.lock().await;
+                    waiting_map.insert(event_id, Waiting { bot_name: name.clone(), start_timestamp: epoch });
+                    
+                    drop(waiting_map);
+                    drop(bot_map);
+
+
+                    for _ in 0..15 { // wait for 2.5 secs to see if the bot has accepted the request
+                        task::sleep(Duration::from_millis(100)).await
+                    }
+
+                    let mut waiting_map = waiting_map_mutex.lock().await;
+                    bot_map = bot_map_mutex.lock().await;
+
+                    if waiting_map.contains_key(&event_id) {
+                        info!("Stupid bot did not respond, giving this instead and resetting other");
+                    } else {
+                        debug!("Other bot succesfully got request");
+                        continue
+                    }
                 }
                 
                 info!("Letting bot proceed");
-                *event_count += 1;
+                event_count += 1;
+                bot_map.get_mut(&bot_name.clone()).unwrap().event_counts.insert(event.clone(), event_count);
+
                 let _ = sender.send(Message::Text(String::from("unhandled"))).await;
 
+                let mut waiting_map = waiting_map_mutex.lock().await;
+                waiting_map.remove(&event_id);
+                drop(waiting_map);
+
+                let mut handled_events = handled_events_mutex.lock().await;
                 handled_events.insert(event_id);
 
-                drop(bot_map);
                 drop(handled_events);
-                println!();
                 continue;
             }
 
