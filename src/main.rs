@@ -123,8 +123,12 @@ async fn handle_connection(
                         text += &format!("{} -> {:?}\n", name, bot.event_counts);
                     }
                     
+                    let waiting_map = waiting_map_mutex.lock().await;
+                    text += &format!("\nWaiting map: {:?}", waiting_map);
+                    
                     let _ = sender.send(Message::Text(text)).await;
                     drop(bot_map);
+                    drop(waiting_map);
                     continue;
                 }
 
@@ -186,7 +190,7 @@ async fn handle_connection(
                 let mut bot_event_counts = bot.event_counts.iter().map(|(name, amount)| (name.clone(), *amount)).collect::<HashMap<String, i32>>();
                 let mut event_count = *bot_event_counts.entry(event.clone()).or_insert(0);
             
-                let target_bot = available_bots.iter().find(|&(name, t_bot)| name == "squircle.macos");
+                let target_bot = available_bots.iter().find(|&(name, t_bot)| *t_bot.event_counts.get(&event.clone()).unwrap_or(&0) < event_count);
 
                 if let Some((name, bot)) = target_bot {
                     info!("Giving turn to {}", name);
@@ -199,15 +203,16 @@ async fn handle_connection(
                     drop(bot_map);
 
 
-                    for _ in 0..15 { // wait for 2.5 secs to see if the bot has accepted the request
+                    for _ in 0..25 { // wait for 2.5 secs to see if the bot has accepted the request
                         task::sleep(Duration::from_millis(100)).await
                     }
 
-                    let mut waiting_map = waiting_map_mutex.lock().await;
+                    waiting_map = waiting_map_mutex.lock().await;
                     bot_map = bot_map_mutex.lock().await;
 
                     if waiting_map.contains_key(&event_id) {
                         info!("Stupid bot did not respond, giving this instead and resetting other");
+                        bot_map.remove(name);
                     } else {
                         debug!("Other bot succesfully got request");
                         continue
